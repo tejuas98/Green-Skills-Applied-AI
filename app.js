@@ -155,12 +155,34 @@ function initJournal() {
   renderJournalWeek(activeJournalWeek, completedTasks, journalNotes);
   calculateProgress(completedTasks);
 
-  // Fetch baseline data from GitHub checked-in journal_data.json
-  fetch('journal_data.json')
+  // Fetch baseline data from GitHub (try Live API first if token exists, fallback to static)
+  const token = localStorage.getItem("1m1b-github-token");
+  let fetchPromise;
+
+  if (token) {
+    const apiUrl = "https://api.github.com/repos/tejuas98/Green-Skills-Applied-AI/contents/journal_data.json";
+    fetchPromise = fetch(apiUrl, {
+      headers: {
+        "Authorization": `token ${token}`,
+        "Accept": "application/vnd.github.v3+json"
+      }
+    })
     .then(response => {
-      if (!response.ok) throw new Error('No json file');
+      if (!response.ok) throw new Error('API fetch failed');
       return response.json();
     })
+    .then(meta => {
+      const decoded = decodeURIComponent(escape(atob(meta.content.replace(/\s/g, ""))));
+      return JSON.parse(decoded);
+    });
+  } else {
+    fetchPromise = fetch('journal_data.json').then(response => {
+      if (!response.ok) throw new Error('No static json');
+      return response.json();
+    });
+  }
+
+  fetchPromise
     .then(data => {
       let changed = false;
       // Merge tasks
@@ -190,7 +212,7 @@ function initJournal() {
       }
     })
     .catch(err => {
-      console.log("Using local browser storage configuration.");
+      console.log("Using local browser storage or failed to retrieve live data from GitHub.", err);
     });
 
   // Week selection
