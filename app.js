@@ -140,19 +140,58 @@ function initFAQ() {
   });
 }
 
-// 4. Progress Journal with LocalStorage
+// 4. Progress Journal with LocalStorage & journal_data.json database
 function initJournal() {
   const weekBtns = document.querySelectorAll(".journal-week-btn");
   const saveBtn = document.getElementById("save-notes-btn");
   const notesArea = document.getElementById("journal-notes");
+  const exportBtn = document.getElementById("export-json-btn");
 
-  // Load completed tasks status from LocalStorage
+  // Load completed tasks status from LocalStorage (local draft)
   let completedTasks = JSON.parse(localStorage.getItem("1m1b-journal-tasks")) || {};
   let journalNotes = JSON.parse(localStorage.getItem("1m1b-journal-notes")) || {};
 
-  // Render active week tasks on startup
+  // Render initial browser draft state on startup
   renderJournalWeek(activeJournalWeek, completedTasks, journalNotes);
   calculateProgress(completedTasks);
+
+  // Fetch baseline data from GitHub checked-in journal_data.json
+  fetch('journal_data.json')
+    .then(response => {
+      if (!response.ok) throw new Error('No json file');
+      return response.json();
+    })
+    .then(data => {
+      let changed = false;
+      // Merge tasks
+      if (data.tasks) {
+        Object.keys(data.tasks).forEach(key => {
+          if (completedTasks[key] === undefined) {
+            completedTasks[key] = data.tasks[key];
+            changed = true;
+          }
+        });
+      }
+      // Merge notes
+      if (data.notes) {
+        Object.keys(data.notes).forEach(key => {
+          if (!journalNotes[key]) {
+            journalNotes[key] = data.notes[key];
+            changed = true;
+          }
+        });
+      }
+
+      if (changed) {
+        localStorage.setItem("1m1b-journal-tasks", JSON.stringify(completedTasks));
+        localStorage.setItem("1m1b-journal-notes", JSON.stringify(journalNotes));
+        renderJournalWeek(activeJournalWeek, completedTasks, journalNotes);
+        calculateProgress(completedTasks);
+      }
+    })
+    .catch(err => {
+      console.log("Using local browser storage configuration.");
+    });
 
   // Week selection
   weekBtns.forEach(btn => {
@@ -187,6 +226,29 @@ function initJournal() {
     journalNotes[activeJournalWeek] = notesArea.value;
     localStorage.setItem("1m1b-journal-notes", JSON.stringify(journalNotes));
   });
+
+  // Export state to journal_data.json
+  if (exportBtn) {
+    exportBtn.addEventListener("click", () => {
+      const exportData = {
+        tasks: JSON.parse(localStorage.getItem("1m1b-journal-tasks")) || {},
+        notes: JSON.parse(localStorage.getItem("1m1b-journal-notes")) || {}
+      };
+      const jsonString = JSON.stringify(exportData, null, 2);
+      const blob = new Blob([jsonString], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const downloadLink = document.createElement("a");
+      downloadLink.href = url;
+      downloadLink.download = "journal_data.json";
+
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      document.body.removeChild(downloadLink);
+
+      URL.revokeObjectURL(url);
+    });
+  }
 }
 
 function renderJournalWeek(weekNum, completedTasks, journalNotes) {
