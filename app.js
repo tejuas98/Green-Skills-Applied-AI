@@ -227,26 +227,133 @@ function initJournal() {
     localStorage.setItem("1m1b-journal-notes", JSON.stringify(journalNotes));
   });
 
-  // Export state to journal_data.json
-  if (exportBtn) {
-    exportBtn.addEventListener("click", () => {
-      const exportData = {
-        tasks: JSON.parse(localStorage.getItem("1m1b-journal-tasks")) || {},
-        notes: JSON.parse(localStorage.getItem("1m1b-journal-notes")) || {}
-      };
-      const jsonString = JSON.stringify(exportData, null, 2);
-      const blob = new Blob([jsonString], { type: "application/json;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
+  // Automated GitHub Sync logic
+  const tokenInput = document.getElementById("github-token");
+  const saveTokenBtn = document.getElementById("save-token-btn");
+  const syncGithubBtn = document.getElementById("sync-github-btn");
+  const syncStatusMsg = document.getElementById("sync-status-msg");
+  const settingsDetails = document.getElementById("github-settings-details");
 
-      const downloadLink = document.createElement("a");
-      downloadLink.href = url;
-      downloadLink.download = "journal_data.json";
+  if (tokenInput) {
+    tokenInput.value = localStorage.getItem("1m1b-github-token") || "";
+    if (tokenInput.value) {
+      if (syncStatusMsg) syncStatusMsg.textContent = "Connected. Click Sync to update GitHub.";
+    }
+  }
 
-      document.body.appendChild(downloadLink);
-      downloadLink.click();
-      document.body.removeChild(downloadLink);
+  if (saveTokenBtn) {
+    saveTokenBtn.addEventListener("click", () => {
+      const tokenVal = tokenInput.value.trim();
+      localStorage.setItem("1m1b-github-token", tokenVal);
+      
+      const originalText = saveTokenBtn.textContent;
+      saveTokenBtn.textContent = "Saved!";
+      saveTokenBtn.style.backgroundColor = "var(--accent-sage)";
+      setTimeout(() => {
+        saveTokenBtn.textContent = originalText;
+        saveTokenBtn.style.backgroundColor = "var(--accent-forest)";
+        if (settingsDetails) settingsDetails.removeAttribute("open");
+      }, 1000);
 
-      URL.revokeObjectURL(url);
+      if (tokenVal) {
+        syncStatusMsg.textContent = "Token saved! Click Sync to update GitHub.";
+        syncStatusMsg.style.color = "var(--text-secondary)";
+      } else {
+        syncStatusMsg.textContent = "Saved locally. Add token above to enable auto-sync to GitHub.";
+        syncStatusMsg.style.color = "var(--text-secondary)";
+      }
+    });
+  }
+
+  if (syncGithubBtn) {
+    syncGithubBtn.addEventListener("click", () => {
+      const token = localStorage.getItem("1m1b-github-token");
+      if (!token) {
+        if (settingsDetails) settingsDetails.setAttribute("open", "");
+        if (tokenInput) tokenInput.focus();
+        syncStatusMsg.textContent = "⚠️ Please paste and save a GitHub token first!";
+        syncStatusMsg.style.color = "#c1121f";
+        return;
+      }
+
+      syncStatusMsg.style.color = "var(--text-secondary)";
+      syncStatusMsg.textContent = "Contacting GitHub metadata...";
+      syncGithubBtn.textContent = "🔄 Syncing...";
+      syncGithubBtn.disabled = true;
+
+      const url = "https://api.github.com/repos/tejuas98/Green-Skills-Applied-AI/contents/journal_data.json";
+
+      // Step 1: Get current file SHA
+      fetch(url, {
+        headers: {
+          "Authorization": `token ${token}`,
+          "Accept": "application/vnd.github.v3+json"
+        }
+      })
+      .then(res => {
+        if (res.status === 404) {
+          // File doesn't exist yet, we can create it without SHA
+          return { sha: null };
+        }
+        if (!res.ok) {
+          throw new Error("Invalid token or repo permissions. Re-check token scopes.");
+        }
+        return res.json();
+      })
+      .then(meta => {
+        const sha = meta.sha;
+        const exportData = {
+          tasks: JSON.parse(localStorage.getItem("1m1b-journal-tasks")) || {},
+          notes: JSON.parse(localStorage.getItem("1m1b-journal-notes")) || {}
+        };
+        const jsonString = JSON.stringify(exportData, null, 2);
+        const base64Content = btoa(unescape(encodeURIComponent(jsonString)));
+
+        const bodyPayload = {
+          message: "Update journal database from Web UI",
+          content: base64Content
+        };
+        if (sha) {
+          bodyPayload.sha = sha;
+        }
+
+        syncStatusMsg.textContent = "Uploading commit to GitHub repository...";
+
+        // Step 2: Push updated file
+        return fetch(url, {
+          method: "PUT",
+          headers: {
+            "Authorization": `token ${token}`,
+            "Content-Type": "application/json",
+            "Accept": "application/vnd.github.v3+json"
+          },
+          body: JSON.stringify(bodyPayload)
+        });
+      })
+      .then(res => {
+        if (!res.ok) throw new Error("GitHub push commit rejected. Verify write rights.");
+        return res.json();
+      })
+      .then(() => {
+        syncGithubBtn.textContent = "✓ Synced successfully!";
+        syncGithubBtn.style.backgroundColor = "var(--accent-sage)";
+        syncStatusMsg.textContent = "Committed successfully! Live site updates in 1-2 minutes.";
+        syncStatusMsg.style.color = "var(--accent-green-text)";
+      })
+      .catch(err => {
+        console.error(err);
+        syncGithubBtn.textContent = "❌ Sync Failed";
+        syncGithubBtn.style.backgroundColor = "#c1121f";
+        syncStatusMsg.textContent = err.message || "Failed to push updates. Please verify token settings.";
+        syncStatusMsg.style.color = "#c1121f";
+      })
+      .finally(() => {
+        syncGithubBtn.disabled = false;
+        setTimeout(() => {
+          syncGithubBtn.textContent = "🔄 Sync to GitHub";
+          syncGithubBtn.style.backgroundColor = "var(--accent-forest)";
+        }, 3500);
+      });
     });
   }
 }
