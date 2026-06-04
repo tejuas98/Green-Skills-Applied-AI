@@ -1,4 +1,34 @@
-// Task lists per week
+// ============================================================
+//  Firebase + Internship Journal — app.js (ES Module)
+// ============================================================
+
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import {
+  getFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  onSnapshot
+} from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ── Firebase Config ─────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyDkGtTtnjs3K2ma3BJkjb4W6IEZzCyyUUA",
+  authDomain: "zersap.firebaseapp.com",
+  projectId: "zersap",
+  storageBucket: "zersap.firebasestorage.app",
+  messagingSenderId: "602431770708",
+  appId: "1:602431770708:web:ba0e91aa677722bb7b9dc1",
+  measurementId: "G-VCKY5SLMHN"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getFirestore(app);
+
+// Firestore document path — isolated from any other Zersap project
+const JOURNAL_DOC = doc(db, "internship-journal", "1m1b-green-skills");
+
+// ── Weekly Task Definitions ──────────────────────────────────
 const WEEKLY_TASKS = {
   1: [
     "Complete Onboarding Orientation & checklist",
@@ -49,12 +79,15 @@ const WEEK_DATES = {
   6: "July 8 – July 14"
 };
 
-// State
-let currentTab = "overview";
-let activePhase = 1;
+// ── App State ────────────────────────────────────────────────
+let currentTab       = "overview";
 let activeJournalWeek = 1;
+let completedTasks   = {};   // { "week-1-task-0": true, … }
+let journalNotes     = {};   // { 1: "my notes…", … }
+let saveDebounce     = null;
+let isViewingAllNotes = false;
 
-// Initialize
+// ── Boot ─────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
   initTabs();
   initTimeline();
@@ -62,76 +95,68 @@ document.addEventListener("DOMContentLoaded", () => {
   initJournal();
 });
 
-// 1. Tab Navigation Routing
+// ── 1. Tab Navigation ────────────────────────────────────────
 function initTabs() {
   const navLinks = document.querySelectorAll(".nav-link");
-  const panels = document.querySelectorAll(".tab-panel");
+  const panels   = document.querySelectorAll(".tab-panel");
 
   navLinks.forEach(link => {
-    link.addEventListener("click", (e) => {
+    link.addEventListener("click", e => {
       e.preventDefault();
-      const targetTab = link.getAttribute("data-tab");
-      
+      const target = link.getAttribute("data-tab");
+
       navLinks.forEach(l => l.classList.remove("active"));
       link.classList.add("active");
 
       panels.forEach(p => {
         p.classList.remove("active");
-        if (p.id === `tab-${targetTab}`) {
-          p.classList.add("active");
-        }
+        if (p.id === `tab-${target}`) p.classList.add("active");
       });
 
-      currentTab = targetTab;
+      currentTab = target;
       window.scrollTo({ top: 0, behavior: "smooth" });
     });
   });
 }
 
-// 2. Interactive Schedule Timeline
+// ── 2. Schedule Timeline ─────────────────────────────────────
 function initTimeline() {
   const phaseBtns = document.querySelectorAll(".timeline-tab-btn");
-  const contents = document.querySelectorAll(".timeline-phase-details");
+  const contents  = document.querySelectorAll(".timeline-phase-details");
 
   phaseBtns.forEach(btn => {
     btn.addEventListener("click", () => {
-      const targetPhase = btn.getAttribute("data-phase");
-      
+      const phase = btn.getAttribute("data-phase");
+
       phaseBtns.forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
 
-      contents.forEach(content => {
-        content.style.display = "none";
-        if (content.id === `phase-content-${targetPhase}`) {
-          content.style.display = "block";
-        }
+      contents.forEach(c => {
+        c.style.display = "none";
+        if (c.id === `phase-content-${phase}`) c.style.display = "block";
       });
-
-      activePhase = targetPhase;
     });
   });
 }
 
-// 3. Searchable FAQ List
+// ── 3. FAQ Search ────────────────────────────────────────────
 function initFAQ() {
   const searchInput = document.getElementById("faq-search");
+  if (!searchInput) return;
+
   const faqItems = document.querySelectorAll(".faq-item-details");
 
-  searchInput.addEventListener("input", (e) => {
+  searchInput.addEventListener("input", e => {
     const query = e.target.value.toLowerCase().trim();
 
     faqItems.forEach(item => {
       const summaryText = item.querySelector("summary").textContent.toLowerCase();
-      const contentText = item.querySelector(".details-content").textContent.toLowerCase();
+      const bodyText    = item.querySelector(".details-content").textContent.toLowerCase();
 
-      if (summaryText.includes(query) || contentText.includes(query)) {
+      if (summaryText.includes(query) || bodyText.includes(query)) {
         item.style.display = "block";
-        // Auto open item if searching is active to improve accessibility
-        if (query.length > 2) {
-          item.setAttribute("open", "");
-        } else {
-          item.removeAttribute("open");
-        }
+        if (query.length > 2) item.setAttribute("open", "");
+        else item.removeAttribute("open");
       } else {
         item.style.display = "none";
         item.removeAttribute("open");
@@ -140,286 +165,126 @@ function initFAQ() {
   });
 }
 
-// 4. Progress Journal with LocalStorage & journal_data.json database
+// ── 4. Journal (Firebase-backed) ─────────────────────────────
 function initJournal() {
-  const weekBtns = document.querySelectorAll(".journal-week-btn");
-  const saveBtn = document.getElementById("save-notes-btn");
-  const notesArea = document.getElementById("journal-notes");
-  const exportBtn = document.getElementById("export-json-btn");
+  setFirebaseStatus("connecting");
 
-  // Load completed tasks status from LocalStorage (local draft)
-  let completedTasks = JSON.parse(localStorage.getItem("1m1b-journal-tasks")) || {};
-  let journalNotes = JSON.parse(localStorage.getItem("1m1b-journal-notes")) || {};
+  // ── Set up Firestore real-time listener ──────────────────
+  onSnapshot(JOURNAL_DOC, snapshot => {
+    if (snapshot.exists()) {
+      const data = snapshot.data();
+      completedTasks = data.tasks || {};
+      journalNotes   = data.notes || {};
+    } else {
+      completedTasks = {};
+      journalNotes   = {};
+    }
 
-  // Render initial browser draft state on startup
-  renderJournalWeek(activeJournalWeek, completedTasks, journalNotes);
-  calculateProgress(completedTasks);
+    setFirebaseStatus("connected");
 
-  // Fetch baseline data from GitHub (try Live API first if token exists, fallback to static)
-  const token = localStorage.getItem("1m1b-github-token");
-  let fetchPromise;
+    // Refresh current view
+    if (isViewingAllNotes) {
+      renderAllNotes();
+    } else {
+      renderJournalWeek(activeJournalWeek);
+    }
+    calculateProgress();
+    updateWeekButtonsState();
+  }, err => {
+    console.error("Firestore error:", err);
+    setFirebaseStatus("error");
+  });
 
-  if (token) {
-    const apiUrl = "https://api.github.com/repos/tejuas98/Green-Skills-Applied-AI/contents/journal_data.json";
-    fetchPromise = fetch(apiUrl, {
-      headers: {
-        "Authorization": `token ${token}`,
-        "Accept": "application/vnd.github.v3+json"
-      }
-    })
-    .then(response => {
-      if (!response.ok) throw new Error('API fetch failed');
-      return response.json();
-    })
-    .then(meta => {
-      const decoded = decodeURIComponent(escape(atob(meta.content.replace(/\s/g, ""))));
-      return JSON.parse(decoded);
-    });
-  } else {
-    fetchPromise = fetch('journal_data.json').then(response => {
-      if (!response.ok) throw new Error('No static json');
-      return response.json();
-    });
-  }
-
-  fetchPromise
-    .then(data => {
-      let changed = false;
-      // Merge tasks
-      if (data.tasks) {
-        Object.keys(data.tasks).forEach(key => {
-          if (completedTasks[key] === undefined) {
-            completedTasks[key] = data.tasks[key];
-            changed = true;
-          }
-        });
-      }
-      // Merge notes
-      if (data.notes) {
-        Object.keys(data.notes).forEach(key => {
-          if (!journalNotes[key]) {
-            journalNotes[key] = data.notes[key];
-            changed = true;
-          }
-        });
-      }
-
-      if (changed) {
-        localStorage.setItem("1m1b-journal-tasks", JSON.stringify(completedTasks));
-        localStorage.setItem("1m1b-journal-notes", JSON.stringify(journalNotes));
-        renderJournalWeek(activeJournalWeek, completedTasks, journalNotes);
-        calculateProgress(completedTasks);
-      }
-    })
-    .catch(err => {
-      console.log("Using local browser storage or failed to retrieve live data from GitHub.", err);
-    });
-
-  // Week selection
+  // ── Week selector buttons ────────────────────────────────
+  const weekBtns = document.querySelectorAll(".journal-week-btn:not(#all-notes-btn)");
   weekBtns.forEach(btn => {
     btn.addEventListener("click", () => {
       activeJournalWeek = parseInt(btn.getAttribute("data-week"));
-      
+      isViewingAllNotes = false;
+
       weekBtns.forEach(b => b.classList.remove("active"));
+      document.getElementById("all-notes-btn").classList.remove("active");
       btn.classList.add("active");
 
-      renderJournalWeek(activeJournalWeek, completedTasks, journalNotes);
+      showWeeklyView();
+      renderJournalWeek(activeJournalWeek);
     });
   });
 
-  // Save notes
-  saveBtn.addEventListener("click", () => {
-    const text = notesArea.value;
-    journalNotes[activeJournalWeek] = text;
-    localStorage.setItem("1m1b-journal-notes", JSON.stringify(journalNotes));
+  // ── "All Notes" button ───────────────────────────────────
+  const allNotesBtn = document.getElementById("all-notes-btn");
+  if (allNotesBtn) {
+    allNotesBtn.addEventListener("click", () => {
+      isViewingAllNotes = true;
 
-    // Show temporary feedback state
-    const originalText = saveBtn.textContent;
-    saveBtn.textContent = "Saved ✓";
-    saveBtn.style.backgroundColor = "var(--accent-sage)";
-    setTimeout(() => {
-      saveBtn.textContent = originalText;
-      saveBtn.style.backgroundColor = "var(--accent-forest)";
-    }, 1500);
-  });
+      weekBtns.forEach(b => b.classList.remove("active"));
+      allNotesBtn.classList.add("active");
 
-  // Handle auto-save on blur
-  notesArea.addEventListener("blur", () => {
-    journalNotes[activeJournalWeek] = notesArea.value;
-    localStorage.setItem("1m1b-journal-notes", JSON.stringify(journalNotes));
-  });
-
-  // Automated GitHub Sync logic
-  const tokenInput = document.getElementById("github-token");
-  const saveTokenBtn = document.getElementById("save-token-btn");
-  const syncGithubBtn = document.getElementById("sync-github-btn");
-  const syncStatusMsg = document.getElementById("sync-status-msg");
-  const settingsDetails = document.getElementById("github-settings-details");
-
-  if (tokenInput) {
-    tokenInput.value = localStorage.getItem("1m1b-github-token") || "";
-    if (tokenInput.value) {
-      if (syncStatusMsg) syncStatusMsg.textContent = "Connected. Click Sync to update GitHub.";
-    }
-  }
-
-  if (saveTokenBtn) {
-    saveTokenBtn.addEventListener("click", () => {
-      const tokenVal = tokenInput.value.trim();
-      localStorage.setItem("1m1b-github-token", tokenVal);
-      
-      const originalText = saveTokenBtn.textContent;
-      saveTokenBtn.textContent = "Saved!";
-      saveTokenBtn.style.backgroundColor = "var(--accent-sage)";
-      setTimeout(() => {
-        saveTokenBtn.textContent = originalText;
-        saveTokenBtn.style.backgroundColor = "var(--accent-forest)";
-        if (settingsDetails) settingsDetails.removeAttribute("open");
-      }, 1000);
-
-      if (tokenVal) {
-        syncStatusMsg.textContent = "Token saved! Click Sync to update GitHub.";
-        syncStatusMsg.style.color = "var(--text-secondary)";
-      } else {
-        syncStatusMsg.textContent = "Saved locally. Add token above to enable auto-sync to GitHub.";
-        syncStatusMsg.style.color = "var(--text-secondary)";
-      }
+      showAllNotesView();
+      renderAllNotes();
     });
   }
 
-  if (syncGithubBtn) {
-    syncGithubBtn.addEventListener("click", () => {
-      const token = localStorage.getItem("1m1b-github-token");
-      if (!token) {
-        if (settingsDetails) settingsDetails.setAttribute("open", "");
-        if (tokenInput) tokenInput.focus();
-        syncStatusMsg.textContent = "⚠️ Please paste and save a GitHub token first!";
-        syncStatusMsg.style.color = "#c1121f";
-        return;
-      }
+  // ── Save Notes button ────────────────────────────────────
+  const saveBtn   = document.getElementById("save-notes-btn");
+  const notesArea = document.getElementById("journal-notes");
 
-      syncStatusMsg.style.color = "var(--text-secondary)";
-      syncStatusMsg.textContent = "Contacting GitHub metadata...";
-      syncGithubBtn.textContent = "🔄 Syncing...";
-      syncGithubBtn.disabled = true;
+  if (saveBtn && notesArea) {
+    saveBtn.addEventListener("click", () => {
+      saveNotes(notesArea.value);
+      flashSaveButton(saveBtn);
+    });
 
-      const url = "https://api.github.com/repos/tejuas98/Green-Skills-Applied-AI/contents/journal_data.json";
-
-      // Step 1: Get current file SHA
-      fetch(url, {
-        headers: {
-          "Authorization": `token ${token}`,
-          "Accept": "application/vnd.github.v3+json"
-        }
-      })
-      .then(res => {
-        if (res.status === 404) {
-          // File doesn't exist yet, we can create it without SHA
-          return { sha: null };
-        }
-        if (!res.ok) {
-          throw new Error("Invalid token or repo permissions. Re-check token scopes.");
-        }
-        return res.json();
-      })
-      .then(meta => {
-        const sha = meta.sha;
-        const exportData = {
-          tasks: JSON.parse(localStorage.getItem("1m1b-journal-tasks")) || {},
-          notes: JSON.parse(localStorage.getItem("1m1b-journal-notes")) || {}
-        };
-        const jsonString = JSON.stringify(exportData, null, 2);
-        const base64Content = btoa(unescape(encodeURIComponent(jsonString)));
-
-        const bodyPayload = {
-          message: "Update journal database from Web UI",
-          content: base64Content
-        };
-        if (sha) {
-          bodyPayload.sha = sha;
-        }
-
-        syncStatusMsg.textContent = "Uploading commit to GitHub repository...";
-
-        // Step 2: Push updated file
-        return fetch(url, {
-          method: "PUT",
-          headers: {
-            "Authorization": `token ${token}`,
-            "Content-Type": "application/json",
-            "Accept": "application/vnd.github.v3+json"
-          },
-          body: JSON.stringify(bodyPayload)
-        });
-      })
-      .then(res => {
-        if (!res.ok) throw new Error("GitHub push commit rejected. Verify write rights.");
-        return res.json();
-      })
-      .then(() => {
-        syncGithubBtn.textContent = "✓ Synced successfully!";
-        syncGithubBtn.style.backgroundColor = "var(--accent-sage)";
-        syncStatusMsg.textContent = "Committed successfully! Live site updates in 1-2 minutes.";
-        syncStatusMsg.style.color = "var(--accent-green-text)";
-      })
-      .catch(err => {
-        console.error(err);
-        syncGithubBtn.textContent = "❌ Sync Failed";
-        syncGithubBtn.style.backgroundColor = "#c1121f";
-        syncStatusMsg.textContent = err.message || "Failed to push updates. Please verify token settings.";
-        syncStatusMsg.style.color = "#c1121f";
-      })
-      .finally(() => {
-        syncGithubBtn.disabled = false;
-        setTimeout(() => {
-          syncGithubBtn.textContent = "🔄 Sync to GitHub";
-          syncGithubBtn.style.backgroundColor = "var(--accent-forest)";
-        }, 3500);
-      });
+    // Auto-save on typing (debounced 1.5 s)
+    notesArea.addEventListener("input", () => {
+      setAutosaveIndicator("Unsaved changes…");
+      clearTimeout(saveDebounce);
+      saveDebounce = setTimeout(() => {
+        saveNotes(notesArea.value);
+      }, 1500);
     });
   }
 }
 
-function renderJournalWeek(weekNum, completedTasks, journalNotes) {
-  const title = document.getElementById("journal-title");
-  const dates = document.getElementById("journal-dates");
-  const tasksContainer = document.getElementById("journal-tasks");
-  const notesArea = document.getElementById("journal-notes");
+// ── Render a weekly view ──────────────────────────────────────
+function renderJournalWeek(weekNum) {
+  const title       = document.getElementById("journal-title");
+  const dates       = document.getElementById("journal-dates");
+  const container   = document.getElementById("journal-tasks");
+  const notesArea   = document.getElementById("journal-notes");
 
-  title.textContent = `Week ${weekNum}: ${getWeekTitle(weekNum)}`;
-  dates.textContent = WEEK_DATES[weekNum];
-  notesArea.value = journalNotes[weekNum] || "";
+  if (!title || !container || !notesArea) return;
 
-  tasksContainer.innerHTML = "";
+  title.textContent     = `Week ${weekNum}: ${getWeekTitle(weekNum)}`;
+  dates.textContent     = WEEK_DATES[weekNum];
+  notesArea.value       = journalNotes[weekNum] || "";
+
+  container.innerHTML = "";
   const tasks = WEEKLY_TASKS[weekNum] || [];
 
   tasks.forEach((taskText, index) => {
-    const taskId = `week-${weekNum}-task-${index}`;
+    const taskId   = `week-${weekNum}-task-${index}`;
     const isChecked = !!completedTasks[taskId];
 
-    const item = document.createElement("div");
-    item.className = `task-item ${isChecked ? 'checked' : ''}`;
+    const item     = document.createElement("div");
+    item.className = `task-item ${isChecked ? "checked" : ""}`;
 
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.className = "task-checkbox";
-    checkbox.checked = isChecked;
+    const checkbox       = document.createElement("input");
+    checkbox.type        = "checkbox";
+    checkbox.className   = "task-checkbox";
+    checkbox.checked     = isChecked;
 
-    const label = document.createElement("span");
-    label.className = "task-label";
+    const label       = document.createElement("span");
+    label.className   = "task-label";
     label.textContent = taskText;
 
     item.appendChild(checkbox);
     item.appendChild(label);
 
-    // Click event to toggle checkbox
-    item.addEventListener("click", (e) => {
-      if (e.target !== checkbox) {
-        checkbox.checked = !checkbox.checked;
-      }
-      
-      const checked = checkbox.checked;
-      if (checked) {
+    item.addEventListener("click", e => {
+      if (e.target !== checkbox) checkbox.checked = !checkbox.checked;
+
+      if (checkbox.checked) {
         item.classList.add("checked");
         completedTasks[taskId] = true;
       } else {
@@ -427,65 +292,220 @@ function renderJournalWeek(weekNum, completedTasks, journalNotes) {
         delete completedTasks[taskId];
       }
 
-      localStorage.setItem("1m1b-journal-tasks", JSON.stringify(completedTasks));
-      calculateProgress(completedTasks);
-      updateWeekButtonsState(completedTasks);
+      calculateProgress();
+      updateWeekButtonsState();
+      persistToFirebase();
     });
 
-    tasksContainer.appendChild(item);
+    container.appendChild(item);
   });
 }
 
-function getWeekTitle(weekNum) {
-  switch (weekNum) {
-    case 1: return "Foundations";
-    case 2: return "Data Handling";
-    case 3: return "PowerBI & AI";
-    case 4: return "Energy Systems";
-    case 5: return "ESG & Validation";
-    case 6: return "Project Showcase";
-    default: return "";
+// ── Render "All Notes" overview ───────────────────────────────
+function renderAllNotes() {
+  const container = document.getElementById("all-notes-container");
+  if (!container) return;
+
+  container.innerHTML = "";
+
+  let hasAnyNotes = false;
+
+  for (let w = 1; w <= 6; w++) {
+    const note = (journalNotes[w] || "").trim();
+
+    const card = document.createElement("div");
+    card.style.cssText = `
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      position: relative;
+    `;
+
+    // Completed tasks count
+    const tasks = WEEKLY_TASKS[w] || [];
+    const doneCount = tasks.filter((_, i) => completedTasks[`week-${w}-task-${i}`]).length;
+
+    const header = document.createElement("div");
+    header.style.cssText = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;";
+
+    const titleEl = document.createElement("div");
+    titleEl.innerHTML = `
+      <div style="font-family: var(--font-serif); font-size: 1.05rem; font-weight: 600; color: var(--text-primary);">
+        Week ${w}: ${getWeekTitle(w)}
+      </div>
+      <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.1rem;">${WEEK_DATES[w]}</div>
+    `;
+
+    const badge = document.createElement("div");
+    badge.style.cssText = `
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 99px;
+      background: ${doneCount === tasks.length && tasks.length > 0 ? "var(--accent-forest)" : "var(--bg-tertiary)"};
+      color: ${doneCount === tasks.length && tasks.length > 0 ? "white" : "var(--text-secondary)"};
+    `;
+    badge.textContent = `${doneCount}/${tasks.length} tasks`;
+
+    header.appendChild(titleEl);
+    header.appendChild(badge);
+
+    const noteEl = document.createElement("div");
+    if (note) {
+      hasAnyNotes = true;
+      noteEl.style.cssText = `
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        line-height: 1.7;
+        white-space: pre-wrap;
+        border-left: 2px solid var(--accent-sage);
+        padding-left: 0.9rem;
+        margin-top: 0.5rem;
+      `;
+      noteEl.textContent = note;
+    } else {
+      noteEl.style.cssText = "font-size: 0.8rem; color: var(--text-muted); font-style: italic; margin-top: 0.5rem;";
+      noteEl.textContent   = "No notes written yet for this week.";
+    }
+
+    // "Edit" jump link
+    const editLink = document.createElement("button");
+    editLink.textContent = "Edit this week →";
+    editLink.style.cssText = `
+      margin-top: 0.75rem;
+      background: none;
+      border: none;
+      color: var(--accent-forest);
+      font-size: 0.78rem;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 0;
+      text-decoration: underline;
+    `;
+    editLink.addEventListener("click", () => {
+      // Switch to weekly view for this week
+      isViewingAllNotes = false;
+      activeJournalWeek = w;
+
+      document.querySelectorAll(".journal-week-btn:not(#all-notes-btn)").forEach(b => {
+        b.classList.remove("active");
+        if (parseInt(b.getAttribute("data-week")) === w) b.classList.add("active");
+      });
+      document.getElementById("all-notes-btn").classList.remove("active");
+
+      showWeeklyView();
+      renderJournalWeek(w);
+    });
+
+    card.appendChild(header);
+    card.appendChild(noteEl);
+    card.appendChild(editLink);
+
+    container.appendChild(card);
+  }
+
+  if (!hasAnyNotes) {
+    const emptyMsg = document.createElement("p");
+    emptyMsg.style.cssText = "font-size: 0.85rem; color: var(--text-muted); font-style: italic;";
+    emptyMsg.textContent   = "You haven't written any notes yet. Go to a week and start writing!";
+    container.prepend(emptyMsg);
   }
 }
 
-function calculateProgress(completedTasks) {
-  let totalTasks = 0;
-  Object.keys(WEEKLY_TASKS).forEach(w => {
-    totalTasks += WEEKLY_TASKS[w].length;
-  });
-
-  const checkedCount = Object.keys(completedTasks).length;
-  const percentage = totalTasks > 0 ? Math.round((checkedCount / totalTasks) * 100) : 0;
-
-  const bar = document.getElementById("progress-bar");
-  const text = document.getElementById("progress-text");
-
-  bar.style.width = `${percentage}%`;
-  text.textContent = `${percentage}% Completed (${checkedCount}/${totalTasks} Milestones)`;
-  
-  updateWeekButtonsState(completedTasks);
+// ── View switching helpers ─────────────────────────────────────
+function showWeeklyView() {
+  document.getElementById("journal-weekly-view").style.display  = "block";
+  document.getElementById("journal-all-notes-view").style.display = "none";
 }
 
-function updateWeekButtonsState(completedTasks) {
-  const weekBtns = document.querySelectorAll(".journal-week-btn");
+function showAllNotesView() {
+  document.getElementById("journal-weekly-view").style.display  = "none";
+  document.getElementById("journal-all-notes-view").style.display = "block";
+}
 
-  weekBtns.forEach(btn => {
-    const weekNum = parseInt(btn.getAttribute("data-week"));
-    const tasks = WEEKLY_TASKS[weekNum] || [];
-    
-    let allCompleted = true;
-    tasks.forEach((_, index) => {
-      const taskId = `week-${weekNum}-task-${index}`;
-      if (!completedTasks[taskId]) {
-        allCompleted = false;
-      }
+// ── Save note for current week to Firestore ───────────────────
+function saveNotes(text) {
+  journalNotes[activeJournalWeek] = text;
+  persistToFirebase();
+  setAutosaveIndicator("Saved to Firebase ✓");
+  setTimeout(() => setAutosaveIndicator(""), 2500);
+}
+
+// ── Write entire journal state to Firestore ───────────────────
+async function persistToFirebase() {
+  try {
+    await setDoc(JOURNAL_DOC, {
+      tasks: completedTasks,
+      notes: journalNotes,
+      updatedAt: new Date().toISOString()
     });
+  } catch (err) {
+    console.error("Failed to save to Firestore:", err);
+    setFirebaseStatus("error");
+  }
+}
 
-    if (allCompleted && tasks.length > 0) {
-      btn.classList.add("completed");
-    } else {
-      btn.classList.remove("completed");
-    }
+// ── Firebase status indicator ─────────────────────────────────
+function setFirebaseStatus(state) {
+  const dot  = document.getElementById("firebase-status-dot");
+  const text = document.getElementById("firebase-status-text");
+  if (!dot || !text) return;
+
+  const states = {
+    connecting: { color: "#f0ad4e", label: "Connecting to Firebase…" },
+    connected:  { color: "#4caf50", label: "Firebase synced ✓"       },
+    error:      { color: "#e53935", label: "Sync error — check console" }
+  };
+
+  const s = states[state] || states.connecting;
+  dot.style.background = s.color;
+  text.textContent     = s.label;
+}
+
+// ── Autosave indicator ────────────────────────────────────────
+function setAutosaveIndicator(msg) {
+  const el = document.getElementById("autosave-indicator");
+  if (el) el.textContent = msg;
+}
+
+// ── Save button flash ─────────────────────────────────────────
+function flashSaveButton(btn) {
+  const orig = btn.textContent;
+  btn.textContent              = "Saved ✓";
+  btn.style.backgroundColor    = "var(--accent-sage)";
+  setTimeout(() => {
+    btn.textContent           = orig;
+    btn.style.backgroundColor = "var(--accent-forest)";
+  }, 1500);
+}
+
+// ── Progress bar ──────────────────────────────────────────────
+function calculateProgress() {
+  let total = 0;
+  Object.values(WEEKLY_TASKS).forEach(arr => (total += arr.length));
+
+  const done       = Object.keys(completedTasks).length;
+  const percentage = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  const bar  = document.getElementById("progress-bar");
+  const text = document.getElementById("progress-text");
+  if (bar)  bar.style.width   = `${percentage}%`;
+  if (text) text.textContent  = `${percentage}% Completed (${done}/${total} Milestones)`;
+}
+
+// ── Week button "all done" state ──────────────────────────────
+function updateWeekButtonsState() {
+  document.querySelectorAll(".journal-week-btn:not(#all-notes-btn)").forEach(btn => {
+    const w     = parseInt(btn.getAttribute("data-week"));
+    const tasks = WEEKLY_TASKS[w] || [];
+    const all   = tasks.length > 0 && tasks.every((_, i) => completedTasks[`week-${w}-task-${i}`]);
+    btn.classList.toggle("completed", all);
   });
 }
 
+// ── Week title helper ─────────────────────────────────────────
+function getWeekTitle(w) {
+  return ["", "Foundations", "Data Handling", "PowerBI & AI",
+          "Energy Systems", "ESG & Validation", "Project Showcase"][w] || "";
+}
