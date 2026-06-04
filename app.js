@@ -34,13 +34,13 @@ const WEEKLY_TASKS = {
     "Complete Onboarding Orientation & checklist",
     "Read and review the Onboarding Offer Letter & Terms",
     "Join the official WhatsApp Community Group",
-    "Attend Jun 03 Session: Sustainability basics, ESG, SDGs",
-    "Attend Jun 06 Session: UN Sustainable Development Goals",
+    "Attend Jun 03 (Wed) Session: Sustainability basics, ESG, SDGs",
+    "Attend Jun 05 (Fri) Session: UN Sustainable Development Goals",
     "Complete first Guided Learning module (IBM SkillsBuild)"
   ],
   2: [
-    "Attend Jun 10 Session: Systems thinking, circular economy",
-    "Attend Jun 11 Session: Climate Data & NumPy / Pandas",
+    "Attend Jun 10 (Wed) Session: Systems thinking, circular economy",
+    "Attend Jun 12 (Fri) Session: Climate Data & NumPy / Pandas",
     "Write Python scripts to parse environmental datasets",
     "Submit weekly assessment quiz 1"
   ],
@@ -51,8 +51,8 @@ const WEEKLY_TASKS = {
     "Submit weekly assessment quiz 2"
   ],
   4: [
-    "Attend Jun 24 Session: Water systems & Biodiversity",
-    "Attend Jun 25 Session: Energy systems, Solar, EVs",
+    "Attend Jun 24 (Wed) Session: Water systems & Biodiversity",
+    "Attend Jun 26 (Fri) Session: Energy systems, Solar, EVs",
     "Draft initial proposal for Campus Green Audit",
     "Submit weekly assessment quiz 3"
   ],
